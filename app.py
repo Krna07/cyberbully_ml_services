@@ -67,7 +67,7 @@ def check_multilingual_toxicity(text, language):
     return is_toxic, toxic_words, confidence
 
 # Load models
-model_path = Path(__file__).parent.parent
+model_path = Path(__file__).parent
 model = vectorizer = cleaner = None
 
 try:
