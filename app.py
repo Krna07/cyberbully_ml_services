@@ -9,9 +9,15 @@ from multilingual_data import HINDI_TOXIC_WORDS, TELUGU_TOXIC_WORDS
 
 app = FastAPI()
 
+# CORS configuration for production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://cyberbully-backend.onrender.com",
+        "*"  # Allow all origins for now
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -123,10 +129,17 @@ def extract_toxic_keywords(text, vectorized, feature_names, top_n=5):
 
 @app.post("/predict")
 async def predict(input_data: TextInput):
-    if not all([model, vectorizer, cleaner]):
-        raise HTTPException(status_code=500, detail="Models not loaded")
-    
     try:
+        if not all([model, vectorizer, cleaner]):
+            return {
+                "error": "Models not loaded",
+                "model_status": {
+                    "model": model is not None,
+                    "vectorizer": vectorizer is not None,
+                    "cleaner": cleaner is not None
+                }
+            }
+        
         # Detect language
         language = detect_language(input_data.text)
         
@@ -243,8 +256,28 @@ async def predict(input_data: TextInput):
         
         return response
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Error in predict: {str(e)}")
+        print(error_details)
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "vectorizer_loaded": vectorizer is not None,
+        "cleaner_loaded": cleaner is not None
+    }
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Cyberbullying Detection ML Service",
+        "version": "1.0.0",
+        "endpoints": {
+            "predict": "/predict",
+            "health": "/health"
+        }
+    }
