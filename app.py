@@ -8,6 +8,20 @@ from pathlib import Path
 import re
 from multilingual_data import HINDI_TOXIC_WORDS, TELUGU_TOXIC_WORDS
 
+# RoBERTa model (loaded lazily to avoid blocking startup)
+roberta_classifier = None
+try:
+    from transformers import pipeline
+    roberta_classifier = pipeline(
+        "text-classification",
+        model="nayan90k/roberta-finetuned-cyberbullying-detection",
+        truncation=True,
+        max_length=512
+    )
+    print("✓ RoBERTa cyberbullying model loaded")
+except Exception as e:
+    print(f"✗ RoBERTa model not loaded: {e}")
+
 app = FastAPI()
 
 app.add_middleware(
@@ -198,7 +212,22 @@ def ensemble_predict_english(text):
         "models_used": "+".join(models_used),
     }
 
-def build_categories(prediction, text):
+def roberta_predict(text):
+    """Run RoBERTa model. Returns (is_toxic: bool, confidence: float) or None if unavailable."""
+    if not roberta_classifier:
+        return None, None
+    try:
+        result = roberta_classifier(text[:512])[0]
+        label = result["label"].lower()
+        score = float(result["score"])
+        # label is typically 'cyberbullying' or 'not cyberbullying' / 'LABEL_1' / 'LABEL_0'
+        is_toxic = "bully" in label or label == "label_1" or label == "1"
+        return is_toxic, round(score, 2)
+    except Exception as e:
+        print(f"RoBERTa predict error: {e}")
+        return None, None
+
+
     text_lower = text.lower()
     cats = {k: 0 for k in ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]}
     if prediction == 1:
@@ -261,35 +290,44 @@ async def predict(input_data: TextInput):
         kw_toxic, kw_found = keyword_based_check(input_data.text)
 
         ensemble = ensemble_predict_english(input_data.text)
-        if ensemble is None:
-            # Fall back to keyword check only
+
+        # RoBERTa — final and most accurate layer
+        roberta_toxic, roberta_conf = roberta_predict(input_data.text)
+
+        # Decision logic:
+        # 1. RoBERTa available → trust it as primary
+        # 2. Keyword override if RoBERTa says safe but explicit keywords found
+        # 3. Fall back to ensemble if RoBERTa unavailable
+        if roberta_toxic is not None:
+            pred = 1 if roberta_toxic else 0
+            confidence = roberta_conf
+            model_used = "roberta"
+            # keyword override even on roberta — explicit slurs are unambiguous
+            if kw_toxic and pred == 0:
+                pred = 1
+                confidence = max(confidence, 0.80)
+                model_used = "roberta+keyword_override"
+        elif ensemble is not None:
+            pred = ensemble["prediction"]
+            confidence = ensemble["confidence"]
+            model_used = ensemble["models_used"]
+            if kw_toxic and pred == 0:
+                pred = 1
+                confidence = max(confidence, 0.78)
+                model_used += "+keyword_override"
+        else:
             pred = 1 if kw_toxic else 0
-            return {
-                "prediction": "Cyberbullying Detected" if kw_toxic else "Safe Message",
-                "confidence": 0.80 if kw_toxic else 0.70,
-                "categories": build_categories(pred, input_data.text),
-                "toxicKeywords": kw_found,
-                "language": "english",
-                "model_used": "keyword_fallback"
-            }
-
-        pred = ensemble["prediction"]
-
-        # If keyword check fires but model says safe, override — keywords are explicit signals
-        if kw_toxic and pred == 0:
-            pred = 1
-            ensemble["confidence"] = max(ensemble["confidence"], 0.78)
-            ensemble["models_used"] += "+keyword_override"
+            confidence = 0.80 if kw_toxic else 0.70
+            model_used = "keyword_fallback"
 
         result = "Cyberbullying Detected" if pred == 1 else "Safe Message"
-        found_keywords = kw_found if pred == 1 else []
         response = {
             "prediction": result,
-            "confidence": ensemble["confidence"],
+            "confidence": confidence,
             "categories": build_categories(pred, input_data.text),
-            "toxicKeywords": found_keywords,
+            "toxicKeywords": kw_found if pred == 1 else [],
             "language": "english",
-            "model_used": ensemble["models_used"]
+            "model_used": model_used
         }
         return response
 
@@ -313,6 +351,7 @@ async def health():
             "hindi_vectorizer": hindi_vectorizer is not None,
             "common_model": common_model is not None,
             "common_vectorizer": common_vectorizer is not None,
+            "roberta_model": roberta_classifier is not None,
         }
     }
 
