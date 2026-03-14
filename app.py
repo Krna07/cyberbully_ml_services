@@ -75,6 +75,7 @@ def check_multilingual_toxicity(text, language):
 # Load models
 model_path = Path(__file__).parent
 model = vectorizer = cleaner = None
+hindi_model = hindi_vectorizer = None
 
 try:
     print("Loading cyberbullying_model.pkl...")
@@ -101,6 +102,23 @@ except Exception as e:
     print(f"✗ Error loading text cleaner: {e}")
     print("Using fallback SimpleTextCleaner")
     cleaner = SimpleTextCleaner()
+
+# Load Hindi models
+try:
+    print("Loading hindi_cyberbullying_model_v2.pkl...")
+    with open(model_path / "hindi_cyberbullying_model_v2.pkl", "rb") as f:
+        hindi_model = pickle.load(f)
+    print("✓ Hindi model loaded successfully")
+except Exception as e:
+    print(f"✗ Error loading Hindi model: {e}")
+
+try:
+    print("Loading hindi_vectorizer_v2.pkl...")
+    with open(model_path / "hindi_vectorizer_v2.pkl", "rb") as f:
+        hindi_vectorizer = pickle.load(f)
+    print("✓ Hindi vectorizer loaded successfully")
+except Exception as e:
+    print(f"✗ Error loading Hindi vectorizer: {e}")
 
 class TextInput(BaseModel):
     text: str
@@ -130,20 +148,74 @@ def extract_toxic_keywords(text, vectorized, feature_names, top_n=5):
 @app.post("/predict")
 async def predict(input_data: TextInput):
     try:
-        if not all([model, vectorizer, cleaner]):
-            return {
-                "error": "Models not loaded",
-                "model_status": {
-                    "model": model is not None,
-                    "vectorizer": vectorizer is not None,
-                    "cleaner": cleaner is not None
-                }
-            }
-        
         # Detect language
         language = detect_language(input_data.text)
         
-        # For Hindi/Telugu, use keyword-based detection
+        # For Hindi, use trained Hindi model if available
+        if language == 'hindi' and hindi_model and hindi_vectorizer:
+            try:
+                print(f"Using trained Hindi model for: {input_data.text[:50]}")
+                
+                # Clean and vectorize Hindi text
+                cleaned_text = cleaner.transform([input_data.text])
+                vectorized = hindi_vectorizer.transform(cleaned_text)
+                
+                # Predict using Hindi model
+                prediction = hindi_model.predict(vectorized)[0]
+                proba = hindi_model.predict_proba(vectorized)[0]
+                confidence = float(max(proba))
+                
+                result = "Cyberbullying Detected" if prediction == 1 else "Safe Message"
+                
+                # Multi-label categories
+                categories = {
+                    "toxic": int(prediction == 1),
+                    "severe_toxic": 0,
+                    "obscene": 0,
+                    "threat": 0,
+                    "insult": 0,
+                    "identity_hate": 0
+                }
+                
+                # Analyze for specific categories
+                text_lower = input_data.text.lower()
+                if prediction == 1:
+                    severe_words = ['madarchod', 'behenchod']
+                    if any(word in text_lower for word in severe_words):
+                        categories["severe_toxic"] = 1
+                    
+                    insult_words = ['chutiya', 'gandu', 'bewakoof', 'pagal']
+                    if any(word in text_lower for word in insult_words):
+                        categories["insult"] = 1
+                    
+                    threat_words = ['maar', 'marunga']
+                    if any(word in text_lower for word in threat_words):
+                        categories["threat"] = 1
+                
+                # Extract toxic keywords
+                toxic_keywords = []
+                if prediction == 1:
+                    feature_names = hindi_vectorizer.get_feature_names_out()
+                    toxic_keywords = extract_toxic_keywords(
+                        input_data.text,
+                        vectorized,
+                        feature_names
+                    )
+                
+                return {
+                    "prediction": result,
+                    "confidence": round(confidence, 2),
+                    "categories": categories,
+                    "toxicKeywords": toxic_keywords,
+                    "language": language,
+                    "model_used": "hindi_trained_model"
+                }
+            except Exception as e:
+                print(f"Hindi model error: {e}, falling back to keyword matching")
+                # Fall back to keyword matching if model fails
+                pass
+        
+        # For Telugu or Hindi fallback, use keyword-based detection
         if language in ['hindi', 'telugu']:
             is_toxic, toxic_words, confidence = check_multilingual_toxicity(
                 input_data.text, 
@@ -186,10 +258,21 @@ async def predict(input_data: TextInput):
                 "confidence": round(confidence, 2),
                 "categories": categories,
                 "toxicKeywords": toxic_words,
-                "language": language
+                "language": language,
+                "model_used": "keyword_matching"
             }
         
-        # For English, use ML model
+        # For English, use trained English model
+        if not all([model, vectorizer, cleaner]):
+            return {
+                "error": "English models not loaded",
+                "model_status": {
+                    "model": model is not None,
+                    "vectorizer": vectorizer is not None,
+                    "cleaner": cleaner is not None
+                }
+            }
+        
         cleaned_text = cleaner.transform([input_data.text])
         vectorized = vectorizer.transform(cleaned_text)
         prediction = model.predict(vectorized)[0]
@@ -241,7 +324,8 @@ async def predict(input_data: TextInput):
             "prediction": result,
             "confidence": round(confidence, 2),
             "categories": categories,
-            "language": "english"
+            "language": "english",
+            "model_used": "english_trained_model"
         }
         
         # Add toxic keywords if bullying detected
@@ -266,9 +350,13 @@ async def predict(input_data: TextInput):
 async def health():
     return {
         "status": "healthy",
-        "model_loaded": model is not None,
-        "vectorizer_loaded": vectorizer is not None,
-        "cleaner_loaded": cleaner is not None
+        "models": {
+            "english_model": model is not None,
+            "english_vectorizer": vectorizer is not None,
+            "text_cleaner": cleaner is not None,
+            "hindi_model": hindi_model is not None,
+            "hindi_vectorizer": hindi_vectorizer is not None
+        }
     }
 
 @app.get("/")
