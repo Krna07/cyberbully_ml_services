@@ -2,25 +2,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pickle
-import joblib
 import numpy as np
 from pathlib import Path
 import re
 from multilingual_data import HINDI_TOXIC_WORDS, TELUGU_TOXIC_WORDS
-
-# RoBERTa model (loaded lazily to avoid blocking startup)
-roberta_classifier = None
-try:
-    from transformers import pipeline
-    roberta_classifier = pipeline(
-        "text-classification",
-        model="nayan90k/roberta-finetuned-cyberbullying-detection",
-        truncation=True,
-        max_length=512
-    )
-    print("✓ RoBERTa cyberbullying model loaded")
-except Exception as e:
-    print(f"✗ RoBERTa model not loaded: {e}")
 
 app = FastAPI()
 
@@ -50,12 +35,10 @@ LEET_MAP = {
 }
 
 def normalize_obfuscation(text):
-    """Expand leet-speak and common obfuscation tricks before model inference."""
     result = []
     for ch in text.lower():
         result.append(LEET_MAP.get(ch, ch))
     text = ''.join(result)
-    # f**k / f*ck / f-u-c-k style
     text = re.sub(r'f[\*\-_\.]+u?[\*\-_\.]*c?[\*\-_\.]*k', 'fuck', text)
     text = re.sub(r's[\*\-_\.]+h[\*\-_\.]*i[\*\-_\.]*t', 'shit', text)
     text = re.sub(r'b[\*\-_\.]+i[\*\-_\.]*t[\*\-_\.]*c[\*\-_\.]*h', 'bitch', text)
@@ -85,12 +68,12 @@ def check_multilingual_toxicity(text, language):
     confidence = min(0.95, 0.6 + (len(toxic_words) * 0.15))
     return is_toxic, toxic_words, confidence
 
-# ── Load models ──────────────────────────────────────────────────────────────
+# ── Load models ───────────────────────────────────────────────────────────────
 model_path = Path(__file__).parent
 model = vectorizer = cleaner = None
 hindi_model = hindi_vectorizer = None
-common_model = common_vectorizer = None
 
+# English model (primary)
 try:
     with open(model_path / "cyberbullying_model.pkl", "rb") as f:
         model = pickle.load(f)
@@ -113,6 +96,7 @@ except Exception as e:
     print(f"✗ text_cleaner: {e} — using fallback")
     cleaner = SimpleTextCleaner()
 
+# Hindi model
 try:
     with open(model_path / "hindi_cyberbullying_model_v2.pkl", "rb") as f:
         hindi_model = pickle.load(f)
@@ -127,40 +111,44 @@ try:
 except Exception as e:
     print(f"✗ hindi_vectorizer: {e}")
 
-try:
-    common_model = joblib.load(model_path / "cyberbullyingcommmon_model.pkl")
-    print("✓ common_model loaded (LogisticRegression)")
-except Exception as e:
-    print(f"✗ common_model: {e}")
+# common_model and roberta — commented out
+# try:
+#     common_model = joblib.load(model_path / "cyberbullyingcommmon_model.pkl")
+# except Exception as e:
+#     print(f"✗ common_model: {e}")
 
-try:
-    common_vectorizer = joblib.load(model_path / "tfidf_vectorizercommon.pkl")
-    print(f"✓ common_vectorizer loaded (vocab={len(common_vectorizer.get_feature_names_out())})")
-except Exception as e:
-    print(f"✗ common_vectorizer: {e}")
+# try:
+#     common_vectorizer = joblib.load(model_path / "tfidf_vectorizercommon.pkl")
+# except Exception as e:
+#     print(f"✗ common_vectorizer: {e}")
+
+# roberta_classifier — commented out
+# try:
+#     from transformers import pipeline
+#     roberta_classifier = pipeline(
+#         "text-classification",
+#         model="nayan90k/roberta-finetuned-cyberbullying-detection",
+#         truncation=True, max_length=512
+#     )
+# except Exception as e:
+#     print(f"✗ RoBERTa: {e}")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 class TextInput(BaseModel):
     text: str
 
 ENGLISH_TOXIC_KEYWORDS = [
-    # Profanity
     'fuck', 'fucking', 'fucker', 'fck', 'fuk',
     'shit', 'bitch', 'ass', 'asshole', 'bastard', 'damn', 'crap',
     'dick', 'cock', 'pussy', 'cunt', 'whore', 'slut',
-    # Insults
     'stupid', 'idiot', 'hate', 'kill', 'die', 'ugly', 'loser', 'dumb',
     'worthless', 'pathetic', 'trash', 'garbage', 'moron', 'fool', 'freak',
     'retard', 'retarded', 'imbecile', 'scum', 'pig', 'fat', 'disgusting',
     'smelly', 'stink', 'stinks', 'gross', 'nasty', 'creep', 'weirdo',
-    # Homophobic / discriminatory
     'gay', 'fag', 'faggot', 'dyke', 'homo', 'queer',
-    # Threats
     'kill you', 'hurt you', 'beat you', 'destroy you', 'rape',
-    # Mum/family insults
-    'ur mum', 'your mum', 'ur mom', 'your mom', 'mother',
-    # Misc
-    'poop', 'poopie', 'poo', 'crap',
+    'ur mum', 'your mum', 'ur mom', 'your mom',
+    'poop', 'poopie', 'poo',
 ]
 
 def extract_toxic_keywords(text, top_n=5):
@@ -168,66 +156,22 @@ def extract_toxic_keywords(text, top_n=5):
     return [w for w in ENGLISH_TOXIC_KEYWORDS if w in normalized][:top_n]
 
 def keyword_based_check(text):
-    """Fast keyword pre-check on normalized text. Returns (is_toxic, found_words)."""
     normalized = normalize_obfuscation(text)
     found = [w for w in ENGLISH_TOXIC_KEYWORDS if w in normalized]
     return len(found) > 0, found
 
-def ensemble_predict_english(text):
-    """Run both English models and combine via soft voting."""
+def predict_english(text):
+    """Primary English model prediction."""
+    if not model or not vectorizer or not cleaner:
+        return None
     normalized = normalize_obfuscation(text)
     cleaned = cleaner.transform([normalized])
-    results = []
+    vec = vectorizer.transform(cleaned)
+    pred = int(model.predict(vec)[0])
+    conf = float(max(model.predict_proba(vec)[0]))
+    return {"prediction": pred, "confidence": round(conf, 2), "model_used": "cyberbullying_model"}
 
-    if model and vectorizer:
-        vec1 = vectorizer.transform(cleaned)
-        pred1 = int(model.predict(vec1)[0])
-        conf1 = float(max(model.predict_proba(vec1)[0]))
-        results.append((pred1, conf1))
-
-    if common_model and common_vectorizer:
-        text_clean = re.sub(r'[^a-z0-9\s]', '', normalized)
-        text_clean = ' '.join(text_clean.split())
-        vec2 = common_vectorizer.transform([text_clean])
-        pred2 = int(common_model.predict(vec2)[0])
-        conf2 = float(max(common_model.predict_proba(vec2)[0]))
-        results.append((pred2, conf2))
-
-    if not results:
-        return None
-
-    # If either model flags bullying → bullying; average confidence
-    final_pred = 1 if any(r[0] == 1 for r in results) else 0
-    final_conf = round(sum(r[1] for r in results) / len(results), 2)
-
-    models_used = []
-    if model and vectorizer:
-        models_used.append("cyberbullying_model")
-    if common_model and common_vectorizer:
-        models_used.append("common_model")
-
-    return {
-        "prediction": final_pred,
-        "confidence": final_conf,
-        "models_used": "+".join(models_used),
-    }
-
-def roberta_predict(text):
-    """Run RoBERTa model. Returns (is_toxic: bool, confidence: float) or None if unavailable."""
-    if not roberta_classifier:
-        return None, None
-    try:
-        result = roberta_classifier(text[:512])[0]
-        label = result["label"].lower()
-        score = float(result["score"])
-        # label is typically 'cyberbullying' or 'not cyberbullying' / 'LABEL_1' / 'LABEL_0'
-        is_toxic = "bully" in label or label == "label_1" or label == "1"
-        return is_toxic, round(score, 2)
-    except Exception as e:
-        print(f"RoBERTa predict error: {e}")
-        return None, None
-
-
+def build_categories(prediction, text):
     text_lower = text.lower()
     cats = {k: 0 for k in ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]}
     if prediction == 1:
@@ -257,9 +201,8 @@ async def predict(input_data: TextInput):
                 vec = hindi_vectorizer.transform(cleaned)
                 pred = int(hindi_model.predict(vec)[0])
                 conf = float(max(hindi_model.predict_proba(vec)[0]))
-                result = "Cyberbullying Detected" if pred == 1 else "Safe Message"
                 return {
-                    "prediction": result,
+                    "prediction": "Cyberbullying Detected" if pred == 1 else "Safe Message",
                     "confidence": round(conf, 2),
                     "categories": build_categories(pred, input_data.text),
                     "toxicKeywords": extract_toxic_keywords(input_data.text) if pred == 1 else [],
@@ -282,54 +225,33 @@ async def predict(input_data: TextInput):
                 "model_used": "keyword_matching"
             }
 
-        # ── English ensemble ──
-        if not cleaner:
-            raise HTTPException(status_code=500, detail="Text cleaner not loaded")
-
-        # Keyword pre-check catches obfuscated/slang text the models may miss
+        # ── English ──
         kw_toxic, kw_found = keyword_based_check(input_data.text)
+        eng = predict_english(input_data.text)
 
-        ensemble = ensemble_predict_english(input_data.text)
-
-        # RoBERTa — final and most accurate layer
-        roberta_toxic, roberta_conf = roberta_predict(input_data.text)
-
-        # Decision logic:
-        # 1. RoBERTa available → trust it as primary
-        # 2. Keyword override if RoBERTa says safe but explicit keywords found
-        # 3. Fall back to ensemble if RoBERTa unavailable
-        if roberta_toxic is not None:
-            pred = 1 if roberta_toxic else 0
-            confidence = roberta_conf
-            model_used = "roberta"
-            # keyword override even on roberta — explicit slurs are unambiguous
+        if eng is not None:
+            pred = eng["prediction"]
+            confidence = eng["confidence"]
+            model_used = eng["model_used"]
+            # keyword override — explicit slurs override model
             if kw_toxic and pred == 0:
                 pred = 1
                 confidence = max(confidence, 0.80)
-                model_used = "roberta+keyword_override"
-        elif ensemble is not None:
-            pred = ensemble["prediction"]
-            confidence = ensemble["confidence"]
-            model_used = ensemble["models_used"]
-            if kw_toxic and pred == 0:
-                pred = 1
-                confidence = max(confidence, 0.78)
                 model_used += "+keyword_override"
         else:
+            # no model loaded — keyword only
             pred = 1 if kw_toxic else 0
             confidence = 0.80 if kw_toxic else 0.70
             model_used = "keyword_fallback"
 
-        result = "Cyberbullying Detected" if pred == 1 else "Safe Message"
-        response = {
-            "prediction": result,
+        return {
+            "prediction": "Cyberbullying Detected" if pred == 1 else "Safe Message",
             "confidence": confidence,
             "categories": build_categories(pred, input_data.text),
             "toxicKeywords": kw_found if pred == 1 else [],
             "language": "english",
             "model_used": model_used
         }
-        return response
 
     except HTTPException:
         raise
@@ -349,9 +271,6 @@ async def health():
             "text_cleaner": cleaner is not None,
             "hindi_model": hindi_model is not None,
             "hindi_vectorizer": hindi_vectorizer is not None,
-            "common_model": common_model is not None,
-            "common_vectorizer": common_vectorizer is not None,
-            "roberta_model": roberta_classifier is not None,
         }
     }
 
