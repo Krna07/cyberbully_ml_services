@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pickle
+import joblib
 import numpy as np
 from pathlib import Path
 import re
@@ -9,342 +10,233 @@ from multilingual_data import HINDI_TOXIC_WORDS, TELUGU_TOXIC_WORDS
 
 app = FastAPI()
 
-# CORS configuration for production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "https://cyberbully-backend.onrender.com",
-        "*"  # Allow all origins for now
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Simple text cleaner class as fallback
 class SimpleTextCleaner:
     def transform(self, texts):
         cleaned = []
         for text in texts:
-            # Convert to lowercase
             text = text.lower()
-            # Remove special characters but keep spaces
             text = re.sub(r'[^a-z0-9\s]', '', text)
-            # Remove extra spaces
             text = ' '.join(text.split())
             cleaned.append(text)
         return cleaned
 
 def detect_language(text):
-    """Detect if text is Hindi, Telugu, or English"""
-    # Check for Devanagari script (Hindi)
     if re.search(r'[\u0900-\u097F]', text):
         return 'hindi'
-    # Check for Telugu script
     if re.search(r'[\u0C00-\u0C7F]', text):
         return 'telugu'
-    # Check for Hindi/Telugu words in Latin script
     text_lower = text.lower()
-    hindi_matches = sum(1 for word in HINDI_TOXIC_WORDS if word in text_lower)
-    telugu_matches = sum(1 for word in TELUGU_TOXIC_WORDS if word in text_lower)
-    
-    if hindi_matches > 0:
+    if sum(1 for word in HINDI_TOXIC_WORDS if word in text_lower) > 0:
         return 'hindi'
-    if telugu_matches > 0:
+    if sum(1 for word in TELUGU_TOXIC_WORDS if word in text_lower) > 0:
         return 'telugu'
-    
     return 'english'
 
 def check_multilingual_toxicity(text, language):
-    """Check for toxic words in Hindi/Telugu"""
     text_lower = text.lower()
     toxic_words = []
-    
     if language == 'hindi':
-        toxic_words = [word for word in HINDI_TOXIC_WORDS if word in text_lower]
+        toxic_words = [w for w in HINDI_TOXIC_WORDS if w in text_lower]
     elif language == 'telugu':
-        toxic_words = [word for word in TELUGU_TOXIC_WORDS if word in text_lower]
-    
+        toxic_words = [w for w in TELUGU_TOXIC_WORDS if w in text_lower]
     is_toxic = len(toxic_words) > 0
     confidence = min(0.95, 0.6 + (len(toxic_words) * 0.15))
-    
     return is_toxic, toxic_words, confidence
 
-# Load models
+# ── Load models ──────────────────────────────────────────────────────────────
 model_path = Path(__file__).parent
 model = vectorizer = cleaner = None
 hindi_model = hindi_vectorizer = None
+common_model = common_vectorizer = None
 
 try:
-    print("Loading cyberbullying_model.pkl...")
     with open(model_path / "cyberbullying_model.pkl", "rb") as f:
         model = pickle.load(f)
-    print("✓ Model loaded successfully")
+    print("✓ cyberbullying_model loaded")
 except Exception as e:
-    print(f"✗ Error loading model: {e}")
+    print(f"✗ cyberbullying_model: {e}")
 
 try:
-    print("Loading tfidf_vectorizer.pkl...")
     with open(model_path / "tfidf_vectorizer.pkl", "rb") as f:
         vectorizer = pickle.load(f)
-    print("✓ Vectorizer loaded successfully")
+    print("✓ tfidf_vectorizer loaded")
 except Exception as e:
-    print(f"✗ Error loading vectorizer: {e}")
+    print(f"✗ tfidf_vectorizer: {e}")
 
 try:
-    print("Loading text_cleaner.pkl...")
     with open(model_path / "text_cleaner.pkl", "rb") as f:
         cleaner = pickle.load(f)
-    print("✓ Text cleaner loaded successfully")
+    print("✓ text_cleaner loaded")
 except Exception as e:
-    print(f"✗ Error loading text cleaner: {e}")
-    print("Using fallback SimpleTextCleaner")
+    print(f"✗ text_cleaner: {e} — using fallback")
     cleaner = SimpleTextCleaner()
 
-# Load Hindi models
 try:
-    print("Loading hindi_cyberbullying_model_v2.pkl...")
     with open(model_path / "hindi_cyberbullying_model_v2.pkl", "rb") as f:
         hindi_model = pickle.load(f)
-    print("✓ Hindi model loaded successfully")
+    print("✓ hindi_model loaded")
 except Exception as e:
-    print(f"✗ Error loading Hindi model: {e}")
+    print(f"✗ hindi_model: {e}")
 
 try:
-    print("Loading hindi_vectorizer_v2.pkl...")
     with open(model_path / "hindi_vectorizer_v2.pkl", "rb") as f:
         hindi_vectorizer = pickle.load(f)
-    print("✓ Hindi vectorizer loaded successfully")
+    print("✓ hindi_vectorizer loaded")
 except Exception as e:
-    print(f"✗ Error loading Hindi vectorizer: {e}")
+    print(f"✗ hindi_vectorizer: {e}")
 
+try:
+    common_model = joblib.load(model_path / "cyberbullyingcommmon_model.pkl")
+    print("✓ common_model loaded (LogisticRegression)")
+except Exception as e:
+    print(f"✗ common_model: {e}")
+
+try:
+    common_vectorizer = joblib.load(model_path / "tfidf_vectorizercommon.pkl")
+    print(f"✓ common_vectorizer loaded (vocab={len(common_vectorizer.get_feature_names_out())})")
+except Exception as e:
+    print(f"✗ common_vectorizer: {e}")
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 class TextInput(BaseModel):
     text: str
 
-class PredictionResponse(BaseModel):
-    prediction: str
-    confidence: float
-    toxicKeywords: list = []
-    categories: dict = {}
-
-def extract_toxic_keywords(text, vectorized, feature_names, top_n=5):
-    """Extract potential toxic keywords from the text"""
+def extract_toxic_keywords(text, top_n=5):
     toxic_words = [
         'stupid', 'idiot', 'hate', 'kill', 'die', 'ugly', 'loser', 'dumb',
         'worthless', 'pathetic', 'trash', 'garbage', 'moron', 'fool', 'freak'
     ]
-    
-    found_keywords = []
     text_lower = text.lower()
-    
-    for word in toxic_words:
-        if word in text_lower:
-            found_keywords.append(word)
-    
-    return found_keywords[:top_n]
+    return [w for w in toxic_words if w in text_lower][:top_n]
 
+def ensemble_predict_english(text):
+    """Run both English models and combine via soft voting."""
+    cleaned = cleaner.transform([text])
+    results = []
+
+    if model and vectorizer:
+        vec1 = vectorizer.transform(cleaned)
+        pred1 = int(model.predict(vec1)[0])
+        conf1 = float(max(model.predict_proba(vec1)[0]))
+        results.append((pred1, conf1))
+
+    if common_model and common_vectorizer:
+        text_clean = re.sub(r'[^a-z0-9\s]', '', text.lower())
+        text_clean = ' '.join(text_clean.split())
+        vec2 = common_vectorizer.transform([text_clean])
+        pred2 = int(common_model.predict(vec2)[0])
+        conf2 = float(max(common_model.predict_proba(vec2)[0]))
+        results.append((pred2, conf2))
+
+    if not results:
+        return None
+
+    # If either model flags bullying → bullying; average confidence
+    final_pred = 1 if any(r[0] == 1 for r in results) else 0
+    final_conf = round(sum(r[1] for r in results) / len(results), 2)
+
+    models_used = []
+    if model and vectorizer:
+        models_used.append("cyberbullying_model")
+    if common_model and common_vectorizer:
+        models_used.append("common_model")
+
+    return {
+        "prediction": final_pred,
+        "confidence": final_conf,
+        "models_used": "+".join(models_used),
+    }
+
+def build_categories(prediction, text):
+    text_lower = text.lower()
+    cats = {k: 0 for k in ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]}
+    if prediction == 1:
+        cats["toxic"] = 1
+        if any(w in text_lower for w in ['kill', 'die', 'death', 'madarchod', 'behenchod']):
+            cats["severe_toxic"] = 1
+        if any(w in text_lower for w in ['damn', 'hell', 'crap', 'fuck']):
+            cats["obscene"] = 1
+        if any(w in text_lower for w in ['kill you', 'hurt you', 'destroy you', 'maar', 'marunga']):
+            cats["threat"] = 1
+        if any(w in text_lower for w in ['stupid', 'idiot', 'dumb', 'moron', 'fool', 'loser', 'ugly', 'chutiya', 'bewakoof']):
+            cats["insult"] = 1
+        if any(w in text_lower for w in ['hate', 'racist', 'sexist']):
+            cats["identity_hate"] = 1
+    return cats
+
+# ── Routes ────────────────────────────────────────────────────────────────────
 @app.post("/predict")
 async def predict(input_data: TextInput):
     try:
-        # Detect language
         language = detect_language(input_data.text)
-        
-        # For Hindi, use trained Hindi model if available
+
+        # ── Hindi ──
         if language == 'hindi' and hindi_model and hindi_vectorizer:
             try:
-                print(f"Using trained Hindi model for: {input_data.text[:50]}")
-                
-                # Clean and vectorize Hindi text
-                cleaned_text = cleaner.transform([input_data.text])
-                vectorized = hindi_vectorizer.transform(cleaned_text)
-                
-                # Predict using Hindi model
-                prediction = hindi_model.predict(vectorized)[0]
-                proba = hindi_model.predict_proba(vectorized)[0]
-                confidence = float(max(proba))
-                
-                result = "Cyberbullying Detected" if prediction == 1 else "Safe Message"
-                
-                # Multi-label categories
-                categories = {
-                    "toxic": int(prediction == 1),
-                    "severe_toxic": 0,
-                    "obscene": 0,
-                    "threat": 0,
-                    "insult": 0,
-                    "identity_hate": 0
-                }
-                
-                # Analyze for specific categories
-                text_lower = input_data.text.lower()
-                if prediction == 1:
-                    severe_words = ['madarchod', 'behenchod']
-                    if any(word in text_lower for word in severe_words):
-                        categories["severe_toxic"] = 1
-                    
-                    insult_words = ['chutiya', 'gandu', 'bewakoof', 'pagal']
-                    if any(word in text_lower for word in insult_words):
-                        categories["insult"] = 1
-                    
-                    threat_words = ['maar', 'marunga']
-                    if any(word in text_lower for word in threat_words):
-                        categories["threat"] = 1
-                
-                # Extract toxic keywords
-                toxic_keywords = []
-                if prediction == 1:
-                    feature_names = hindi_vectorizer.get_feature_names_out()
-                    toxic_keywords = extract_toxic_keywords(
-                        input_data.text,
-                        vectorized,
-                        feature_names
-                    )
-                
+                cleaned = cleaner.transform([input_data.text])
+                vec = hindi_vectorizer.transform(cleaned)
+                pred = int(hindi_model.predict(vec)[0])
+                conf = float(max(hindi_model.predict_proba(vec)[0]))
+                result = "Cyberbullying Detected" if pred == 1 else "Safe Message"
                 return {
                     "prediction": result,
-                    "confidence": round(confidence, 2),
-                    "categories": categories,
-                    "toxicKeywords": toxic_keywords,
+                    "confidence": round(conf, 2),
+                    "categories": build_categories(pred, input_data.text),
+                    "toxicKeywords": extract_toxic_keywords(input_data.text) if pred == 1 else [],
                     "language": language,
                     "model_used": "hindi_trained_model"
                 }
             except Exception as e:
                 print(f"Hindi model error: {e}, falling back to keyword matching")
-                # Fall back to keyword matching if model fails
-                pass
-        
-        # For Telugu or Hindi fallback, use keyword-based detection
+
+        # ── Hindi / Telugu keyword fallback ──
         if language in ['hindi', 'telugu']:
-            is_toxic, toxic_words, confidence = check_multilingual_toxicity(
-                input_data.text, 
-                language
-            )
-            
-            result = "Cyberbullying Detected" if is_toxic else "Safe Message"
-            
-            # Multi-label categories for non-English
-            categories = {
-                "toxic": int(is_toxic),
-                "severe_toxic": 0,
-                "obscene": 0,
-                "threat": 0,
-                "insult": 0,
-                "identity_hate": 0
-            }
-            
-            if is_toxic:
-                # Categorize based on keywords
-                text_lower = input_data.text.lower()
-                
-                # Check for severe toxic
-                severe_words = ['madarchod', 'behenchod', 'dengey', 'lanjakodaka']
-                if any(word in text_lower for word in severe_words):
-                    categories["severe_toxic"] = 1
-                
-                # Check for insults
-                insult_words = ['chutiya', 'gandu', 'bewakoof', 'pagal', 'erripuka', 'buddodu']
-                if any(word in text_lower for word in insult_words):
-                    categories["insult"] = 1
-                
-                # Check for threats
-                threat_words = ['maar', 'marunga', 'kottesta', 'champesta']
-                if any(word in text_lower for word in threat_words):
-                    categories["threat"] = 1
-            
+            is_toxic, toxic_words, confidence = check_multilingual_toxicity(input_data.text, language)
+            pred = 1 if is_toxic else 0
             return {
-                "prediction": result,
+                "prediction": "Cyberbullying Detected" if is_toxic else "Safe Message",
                 "confidence": round(confidence, 2),
-                "categories": categories,
+                "categories": build_categories(pred, input_data.text),
                 "toxicKeywords": toxic_words,
                 "language": language,
                 "model_used": "keyword_matching"
             }
-        
-        # For English, use trained English model
-        if not all([model, vectorizer, cleaner]):
-            return {
-                "error": "English models not loaded",
-                "model_status": {
-                    "model": model is not None,
-                    "vectorizer": vectorizer is not None,
-                    "cleaner": cleaner is not None
-                }
-            }
-        
-        cleaned_text = cleaner.transform([input_data.text])
-        vectorized = vectorizer.transform(cleaned_text)
-        prediction = model.predict(vectorized)[0]
-        proba = model.predict_proba(vectorized)[0]
-        confidence = float(max(proba))
-        
-        result = "Cyberbullying Detected" if prediction == 1 else "Safe Message"
-        
-        # Multi-label toxicity categories
-        categories = {
-            "toxic": int(prediction == 1),
-            "severe_toxic": 0,
-            "obscene": 0,
-            "threat": 0,
-            "insult": 0,
-            "identity_hate": 0
-        }
-        
-        # Analyze text for specific categories
-        text_lower = input_data.text.lower()
-        
-        if prediction == 1:
-            # Severe toxic indicators
-            severe_words = ['kill', 'die', 'death']
-            if any(word in text_lower for word in severe_words):
-                categories["severe_toxic"] = 1
-            
-            # Obscene indicators
-            obscene_words = ['damn', 'hell', 'crap', 'fuck']
-            if any(word in text_lower for word in obscene_words):
-                categories["obscene"] = 1
-            
-            # Threat indicators
-            threat_words = ['kill you', 'hurt you', 'destroy you', 'gonna get you']
-            if any(phrase in text_lower for phrase in threat_words):
-                categories["threat"] = 1
-            
-            # Insult indicators
-            insult_words = ['stupid', 'idiot', 'dumb', 'moron', 'fool', 'loser', 'ugly']
-            if any(word in text_lower for word in insult_words):
-                categories["insult"] = 1
-            
-            # Identity hate indicators
-            hate_words = ['hate', 'racist', 'sexist']
-            if any(word in text_lower for word in hate_words):
-                categories["identity_hate"] = 1
-        
+
+        # ── English ensemble ──
+        if not cleaner:
+            raise HTTPException(status_code=500, detail="Text cleaner not loaded")
+
+        ensemble = ensemble_predict_english(input_data.text)
+        if ensemble is None:
+            raise HTTPException(status_code=500, detail="No English models loaded")
+
+        pred = ensemble["prediction"]
+        result = "Cyberbullying Detected" if pred == 1 else "Safe Message"
         response = {
             "prediction": result,
-            "confidence": round(confidence, 2),
-            "categories": categories,
+            "confidence": ensemble["confidence"],
+            "categories": build_categories(pred, input_data.text),
+            "toxicKeywords": extract_toxic_keywords(input_data.text) if pred == 1 else [],
             "language": "english",
-            "model_used": "english_trained_model"
+            "model_used": ensemble["models_used"]
         }
-        
-        # Add toxic keywords if bullying detected
-        if prediction == 1:
-            feature_names = vectorizer.get_feature_names_out()
-            toxic_keywords = extract_toxic_keywords(
-                input_data.text, 
-                vectorized, 
-                feature_names
-            )
-            response["toxicKeywords"] = toxic_keywords
-        
         return response
+
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
-        error_details = traceback.format_exc()
-        print(f"Error in predict: {str(e)}")
-        print(error_details)
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
 
 @app.get("/health")
 async def health():
@@ -355,17 +247,12 @@ async def health():
             "english_vectorizer": vectorizer is not None,
             "text_cleaner": cleaner is not None,
             "hindi_model": hindi_model is not None,
-            "hindi_vectorizer": hindi_vectorizer is not None
+            "hindi_vectorizer": hindi_vectorizer is not None,
+            "common_model": common_model is not None,
+            "common_vectorizer": common_vectorizer is not None,
         }
     }
 
 @app.get("/")
 async def root():
-    return {
-        "message": "Cyberbullying Detection ML Service",
-        "version": "1.0.0",
-        "endpoints": {
-            "predict": "/predict",
-            "health": "/health"
-        }
-    }
+    return {"message": "Cyberbullying Detection ML Service", "version": "2.0.0"}
