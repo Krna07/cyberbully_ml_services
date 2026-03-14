@@ -28,6 +28,26 @@ class SimpleTextCleaner:
             cleaned.append(text)
         return cleaned
 
+# Leet-speak / obfuscation normalization map
+LEET_MAP = {
+    '@': 'a', '4': 'a', '3': 'e', '1': 'i', '!': 'i',
+    '0': 'o', '5': 's', '$': 's', '7': 't', '+': 't',
+    '8': 'b', '6': 'g',
+}
+
+def normalize_obfuscation(text):
+    """Expand leet-speak and common obfuscation tricks before model inference."""
+    result = []
+    for ch in text.lower():
+        result.append(LEET_MAP.get(ch, ch))
+    text = ''.join(result)
+    # f**k / f*ck / f-u-c-k style
+    text = re.sub(r'f[\*\-_\.]+u?[\*\-_\.]*c?[\*\-_\.]*k', 'fuck', text)
+    text = re.sub(r's[\*\-_\.]+h[\*\-_\.]*i[\*\-_\.]*t', 'shit', text)
+    text = re.sub(r'b[\*\-_\.]+i[\*\-_\.]*t[\*\-_\.]*c[\*\-_\.]*h', 'bitch', text)
+    text = re.sub(r'a[\*\-_\.]+s[\*\-_\.]*s', 'ass', text)
+    return text
+
 def detect_language(text):
     if re.search(r'[\u0900-\u097F]', text):
         return 'hindi'
@@ -109,17 +129,40 @@ except Exception as e:
 class TextInput(BaseModel):
     text: str
 
+ENGLISH_TOXIC_KEYWORDS = [
+    # Profanity
+    'fuck', 'fucking', 'fucker', 'fck', 'fuk',
+    'shit', 'bitch', 'ass', 'asshole', 'bastard', 'damn', 'crap',
+    'dick', 'cock', 'pussy', 'cunt', 'whore', 'slut',
+    # Insults
+    'stupid', 'idiot', 'hate', 'kill', 'die', 'ugly', 'loser', 'dumb',
+    'worthless', 'pathetic', 'trash', 'garbage', 'moron', 'fool', 'freak',
+    'retard', 'retarded', 'imbecile', 'scum', 'pig', 'fat', 'disgusting',
+    'smelly', 'stink', 'stinks', 'gross', 'nasty', 'creep', 'weirdo',
+    # Homophobic / discriminatory
+    'gay', 'fag', 'faggot', 'dyke', 'homo', 'queer',
+    # Threats
+    'kill you', 'hurt you', 'beat you', 'destroy you', 'rape',
+    # Mum/family insults
+    'ur mum', 'your mum', 'ur mom', 'your mom', 'mother',
+    # Misc
+    'poop', 'poopie', 'poo', 'crap',
+]
+
 def extract_toxic_keywords(text, top_n=5):
-    toxic_words = [
-        'stupid', 'idiot', 'hate', 'kill', 'die', 'ugly', 'loser', 'dumb',
-        'worthless', 'pathetic', 'trash', 'garbage', 'moron', 'fool', 'freak'
-    ]
-    text_lower = text.lower()
-    return [w for w in toxic_words if w in text_lower][:top_n]
+    normalized = normalize_obfuscation(text)
+    return [w for w in ENGLISH_TOXIC_KEYWORDS if w in normalized][:top_n]
+
+def keyword_based_check(text):
+    """Fast keyword pre-check on normalized text. Returns (is_toxic, found_words)."""
+    normalized = normalize_obfuscation(text)
+    found = [w for w in ENGLISH_TOXIC_KEYWORDS if w in normalized]
+    return len(found) > 0, found
 
 def ensemble_predict_english(text):
     """Run both English models and combine via soft voting."""
-    cleaned = cleaner.transform([text])
+    normalized = normalize_obfuscation(text)
+    cleaned = cleaner.transform([normalized])
     results = []
 
     if model and vectorizer:
@@ -129,7 +172,7 @@ def ensemble_predict_english(text):
         results.append((pred1, conf1))
 
     if common_model and common_vectorizer:
-        text_clean = re.sub(r'[^a-z0-9\s]', '', text.lower())
+        text_clean = re.sub(r'[^a-z0-9\s]', '', normalized)
         text_clean = ' '.join(text_clean.split())
         vec2 = common_vectorizer.transform([text_clean])
         pred2 = int(common_model.predict(vec2)[0])
@@ -214,17 +257,37 @@ async def predict(input_data: TextInput):
         if not cleaner:
             raise HTTPException(status_code=500, detail="Text cleaner not loaded")
 
+        # Keyword pre-check catches obfuscated/slang text the models may miss
+        kw_toxic, kw_found = keyword_based_check(input_data.text)
+
         ensemble = ensemble_predict_english(input_data.text)
         if ensemble is None:
-            raise HTTPException(status_code=500, detail="No English models loaded")
+            # Fall back to keyword check only
+            pred = 1 if kw_toxic else 0
+            return {
+                "prediction": "Cyberbullying Detected" if kw_toxic else "Safe Message",
+                "confidence": 0.80 if kw_toxic else 0.70,
+                "categories": build_categories(pred, input_data.text),
+                "toxicKeywords": kw_found,
+                "language": "english",
+                "model_used": "keyword_fallback"
+            }
 
         pred = ensemble["prediction"]
+
+        # If keyword check fires but model says safe, override — keywords are explicit signals
+        if kw_toxic and pred == 0:
+            pred = 1
+            ensemble["confidence"] = max(ensemble["confidence"], 0.78)
+            ensemble["models_used"] += "+keyword_override"
+
         result = "Cyberbullying Detected" if pred == 1 else "Safe Message"
+        found_keywords = kw_found if pred == 1 else []
         response = {
             "prediction": result,
             "confidence": ensemble["confidence"],
             "categories": build_categories(pred, input_data.text),
-            "toxicKeywords": extract_toxic_keywords(input_data.text) if pred == 1 else [],
+            "toxicKeywords": found_keywords,
             "language": "english",
             "model_used": ensemble["models_used"]
         }
