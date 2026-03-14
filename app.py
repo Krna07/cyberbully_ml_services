@@ -138,17 +138,58 @@ class TextInput(BaseModel):
     text: str
 
 ENGLISH_TOXIC_KEYWORDS = [
-    'fuck', 'fucking', 'fucker', 'fck', 'fuk',
-    'shit', 'bitch', 'ass', 'asshole', 'bastard', 'damn', 'crap',
-    'dick', 'cock', 'pussy', 'cunt', 'whore', 'slut',
-    'stupid', 'idiot', 'hate', 'kill', 'die', 'ugly', 'loser', 'dumb',
-    'worthless', 'pathetic', 'trash', 'garbage', 'moron', 'fool', 'freak',
-    'retard', 'retarded', 'imbecile', 'scum', 'pig', 'fat', 'disgusting',
-    'smelly', 'stink', 'stinks', 'gross', 'nasty', 'creep', 'weirdo',
+    # Profanity
+    'fuck', 'fucking', 'fucker', 'fucked', 'fck', 'fuk', 'wtf',
+    'shit', 'shitty', 'bullshit', 'horseshit',
+    'bitch', 'bitchy', 'bitches',
+    'ass', 'asshole', 'arse', 'arsehole',
+    'bastard', 'damn', 'crap', 'crappy',
+    'dick', 'dickhead', 'cock', 'cockhead',
+    'pussy', 'cunt', 'whore', 'slut', 'skank', 'hoe',
+    'prick', 'twat', 'wanker', 'tosser', 'bellend',
+
+    # Insults
+    'stupid', 'stupido', 'idiot', 'idiotic',
+    'hate', 'hater', 'hating',
+    'kill', 'die', 'dead', 'death',
+    'ugly', 'loser', 'dumb', 'dumbass', 'dumbhead',
+    'worthless', 'pathetic', 'trash', 'garbage',
+    'moron', 'fool', 'freak', 'freaky',
+    'retard', 'retarded', 'imbecile', 'scum', 'scumbag',
+    'pig', 'fat', 'fatso', 'fatty', 'lard',
+    'disgusting', 'disgust', 'revolting',
+    'smelly', 'stink', 'stinks', 'stinky',
+    'gross', 'nasty', 'creep', 'creepy', 'weirdo', 'weird',
+    'nobody', 'nothing', 'useless', 'hopeless', 'failure',
+    'coward', 'wimp', 'crybaby', 'baby', 'clown',
+    'joke', 'laughingstock', 'embarrassment',
+    'shut up', 'shutup', 'go away', 'get lost', 'drop dead',
+    'no one likes you', 'nobody likes you', 'everyone hates you',
+    'go die', 'kys', 'kill yourself',
+
+    # Homophobic / discriminatory
     'gay', 'fag', 'faggot', 'dyke', 'homo', 'queer',
+    'tranny', 'transgender freak',
+    'racist', 'sexist', 'bigot',
+
+    # Threats
     'kill you', 'hurt you', 'beat you', 'destroy you', 'rape',
+    'i will find you', 'watch your back', 'you will pay',
+    'gonna get you', 'come after you',
+
+    # Family insults
     'ur mum', 'your mum', 'ur mom', 'your mom',
-    'poop', 'poopie', 'poo',
+    'ur dad', 'your dad', 'ur family', 'your family',
+    'son of a bitch', 'son of a whore', 'motherf',
+
+    # Body shaming
+    'fat pig', 'ugly pig', 'cow', 'whale',
+    'flat', 'tiny', 'small',
+
+    # Misc
+    'poop', 'poopie', 'poo', 'piss', 'pissed',
+    'suck', 'sucks', 'sucker', 'lick my',
+    'go to hell', 'burn in hell', 'rot in hell',
 ]
 
 def extract_toxic_keywords(text, top_n=5):
