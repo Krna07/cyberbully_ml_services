@@ -70,23 +70,31 @@ def check_multilingual_toxicity(text, language):
 
 # ── Load models ───────────────────────────────────────────────────────────────
 model_path = Path(__file__).parent
-model = vectorizer = cleaner = None
+cleaner = None
 hindi_model = hindi_vectorizer = None
+distilbert_model = distilbert_tokenizer = None
 
-# English model (primary)
+# ── DistilBERT multi-label English model (primary) ────────────────────────
 try:
-    with open(model_path / "cyberbullying_model.pkl", "rb") as f:
-        model = pickle.load(f)
-    print("✓ cyberbullying_model loaded")
+    import torch
+    import torch.nn as nn
+    with open(model_path / "toxic_bullying_model.pkl", "rb") as f:
+        distilbert_model = pickle.load(f)
+    with open(model_path / "tokenizer.pkl", "rb") as f:
+        distilbert_tokenizer = pickle.load(f)
+    distilbert_model.eval()
+    print("✓ DistilBERT toxic_bullying_model loaded")
 except Exception as e:
-    print(f"✗ cyberbullying_model: {e}")
+    print(f"✗ DistilBERT model: {e}")
 
-try:
-    with open(model_path / "tfidf_vectorizer.pkl", "rb") as f:
-        vectorizer = pickle.load(f)
-    print("✓ tfidf_vectorizer loaded")
-except Exception as e:
-    print(f"✗ tfidf_vectorizer: {e}")
+# ── Fallback sklearn English model (commented out — replaced by DistilBERT) ──
+# try:
+#     with open(model_path / "cyberbullying_model.pkl", "rb") as f:
+#         model = pickle.load(f)
+#     with open(model_path / "tfidf_vectorizer.pkl", "rb") as f:
+#         vectorizer = pickle.load(f)
+# except Exception as e:
+#     print(f"✗ sklearn model: {e}")
 
 try:
     with open(model_path / "text_cleaner.pkl", "rb") as f:
@@ -96,7 +104,7 @@ except Exception as e:
     print(f"✗ text_cleaner: {e} — using fallback")
     cleaner = SimpleTextCleaner()
 
-# Hindi model
+# ── Hindi model ───────────────────────────────────────────────────────────
 try:
     with open(model_path / "hindi_cyberbullying_model_v2.pkl", "rb") as f:
         hindi_model = pickle.load(f)
@@ -110,28 +118,6 @@ try:
     print("✓ hindi_vectorizer loaded")
 except Exception as e:
     print(f"✗ hindi_vectorizer: {e}")
-
-# common_model and roberta — commented out
-# try:
-#     common_model = joblib.load(model_path / "cyberbullyingcommmon_model.pkl")
-# except Exception as e:
-#     print(f"✗ common_model: {e}")
-
-# try:
-#     common_vectorizer = joblib.load(model_path / "tfidf_vectorizercommon.pkl")
-# except Exception as e:
-#     print(f"✗ common_vectorizer: {e}")
-
-# roberta_classifier — commented out
-# try:
-#     from transformers import pipeline
-#     roberta_classifier = pipeline(
-#         "text-classification",
-#         model="nayan90k/roberta-finetuned-cyberbullying-detection",
-#         truncation=True, max_length=512
-#     )
-# except Exception as e:
-#     print(f"✗ RoBERTa: {e}")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 class TextInput(BaseModel):
@@ -201,32 +187,56 @@ def keyword_based_check(text):
     found = [w for w in ENGLISH_TOXIC_KEYWORDS if w in normalized]
     return len(found) > 0, found
 
-def predict_english(text):
-    """Primary English model prediction."""
-    if not model or not vectorizer or not cleaner:
-        return None
-    normalized = normalize_obfuscation(text)
-    cleaned = cleaner.transform([normalized])
-    vec = vectorizer.transform(cleaned)
-    pred = int(model.predict(vec)[0])
-    conf = float(max(model.predict_proba(vec)[0]))
-    return {"prediction": pred, "confidence": round(conf, 2), "model_used": "cyberbullying_model"}
+DISTILBERT_LABEL_MAP = {
+    0: 'toxic', 1: 'severe_toxic', 2: 'obscene',
+    3: 'threat', 4: 'insult', 5: 'identity_hate'
+}
 
-def build_categories(prediction, text):
-    text_lower = text.lower()
+def predict_english(text):
+    """DistilBERT multi-label English prediction."""
+    if not distilbert_model or not distilbert_tokenizer:
+        return None
+    try:
+        import torch, torch.nn as nn
+        inputs = distilbert_tokenizer(text, return_tensors='pt', truncation=True, max_length=512)
+        with torch.no_grad():
+            logits = distilbert_model(**inputs).logits
+        probs = nn.Sigmoid()(logits)[0]
+        detected = {DISTILBERT_LABEL_MAP[i]: round(float(probs[i]), 2) for i in range(6) if probs[i] > 0.5}
+        is_toxic = len(detected) > 0
+        confidence = round(float(max(probs)), 2)
+        return {
+            "prediction": 1 if is_toxic else 0,
+            "confidence": confidence,
+            "model_used": "distilbert_toxic_bullying",
+            "detected_labels": detected
+        }
+    except Exception as e:
+        print(f"DistilBERT predict error: {e}")
+        return None
+
+def build_categories(prediction, text, detected_labels=None):
     cats = {k: 0 for k in ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]}
     if prediction == 1:
-        cats["toxic"] = 1
-        if any(w in text_lower for w in ['kill', 'die', 'death', 'madarchod', 'behenchod']):
-            cats["severe_toxic"] = 1
-        if any(w in text_lower for w in ['damn', 'hell', 'crap', 'fuck']):
-            cats["obscene"] = 1
-        if any(w in text_lower for w in ['kill you', 'hurt you', 'destroy you', 'maar', 'marunga']):
-            cats["threat"] = 1
-        if any(w in text_lower for w in ['stupid', 'idiot', 'dumb', 'moron', 'fool', 'loser', 'ugly', 'chutiya', 'bewakoof']):
-            cats["insult"] = 1
-        if any(w in text_lower for w in ['hate', 'racist', 'sexist']):
-            cats["identity_hate"] = 1
+        if detected_labels:
+            # use DistilBERT's actual detected labels
+            for label in detected_labels:
+                if label in cats:
+                    cats[label] = 1
+        else:
+            # keyword-based fallback category detection
+            text_lower = text.lower()
+            cats["toxic"] = 1
+            if any(w in text_lower for w in ['kill', 'die', 'death', 'madarchod', 'behenchod']):
+                cats["severe_toxic"] = 1
+            if any(w in text_lower for w in ['damn', 'hell', 'crap', 'fuck']):
+                cats["obscene"] = 1
+            if any(w in text_lower for w in ['kill you', 'hurt you', 'destroy you', 'maar', 'marunga']):
+                cats["threat"] = 1
+            if any(w in text_lower for w in ['stupid', 'idiot', 'dumb', 'moron', 'fool', 'loser', 'ugly', 'chutiya', 'bewakoof']):
+                cats["insult"] = 1
+            if any(w in text_lower for w in ['hate', 'racist', 'sexist']):
+                cats["identity_hate"] = 1
     return cats
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -274,21 +284,23 @@ async def predict(input_data: TextInput):
             pred = eng["prediction"]
             confidence = eng["confidence"]
             model_used = eng["model_used"]
+            detected_labels = eng.get("detected_labels", {})
             # keyword override — explicit slurs override model
             if kw_toxic and pred == 0:
                 pred = 1
                 confidence = max(confidence, 0.80)
                 model_used += "+keyword_override"
+                detected_labels = {}
         else:
-            # no model loaded — keyword only
             pred = 1 if kw_toxic else 0
             confidence = 0.80 if kw_toxic else 0.70
             model_used = "keyword_fallback"
+            detected_labels = {}
 
         return {
             "prediction": "Cyberbullying Detected" if pred == 1 else "Safe Message",
             "confidence": confidence,
-            "categories": build_categories(pred, input_data.text),
+            "categories": build_categories(pred, input_data.text, detected_labels if pred == 1 else None),
             "toxicKeywords": kw_found if pred == 1 else [],
             "language": "english",
             "model_used": model_used
@@ -307,9 +319,8 @@ async def health():
     return {
         "status": "healthy",
         "models": {
-            "english_model": model is not None,
-            "english_vectorizer": vectorizer is not None,
-            "text_cleaner": cleaner is not None,
+            "distilbert_english": distilbert_model is not None,
+            "distilbert_tokenizer": distilbert_tokenizer is not None,
             "hindi_model": hindi_model is not None,
             "hindi_vectorizer": hindi_vectorizer is not None,
         }
