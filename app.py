@@ -27,7 +27,6 @@ class SimpleTextCleaner:
             cleaned.append(text)
         return cleaned
 
-# Leet-speak / obfuscation normalization map
 LEET_MAP = {
     '@': 'a', '4': 'a', '3': 'e', '1': 'i', '!': 'i',
     '0': 'o', '5': 's', '$': 's', '7': 't', '+': 't',
@@ -35,9 +34,7 @@ LEET_MAP = {
 }
 
 def normalize_obfuscation(text):
-    result = []
-    for ch in text.lower():
-        result.append(LEET_MAP.get(ch, ch))
+    result = [LEET_MAP.get(ch, ch) for ch in text.lower()]
     text = ''.join(result)
     text = re.sub(r'f[\*\-_\.]+u?[\*\-_\.]*c?[\*\-_\.]*k', 'fuck', text)
     text = re.sub(r's[\*\-_\.]+h[\*\-_\.]*i[\*\-_\.]*t', 'shit', text)
@@ -70,14 +67,13 @@ def check_multilingual_toxicity(text, language):
 
 # ── Load models ───────────────────────────────────────────────────────────────
 model_path = Path(__file__).parent
-cleaner = None
+model = vectorizer = cleaner = None
 hindi_model = hindi_vectorizer = None
 distilbert_model = distilbert_tokenizer = None
 
-# ── DistilBERT multi-label English model (primary) ────────────────────────
+# ── DistilBERT (primary English — loads if available) ─────────────────────
 try:
     import torch
-    import torch.nn as nn
     with open(model_path / "toxic_bullying_model.pkl", "rb") as f:
         distilbert_model = pickle.load(f)
     with open(model_path / "tokenizer.pkl", "rb") as f:
@@ -85,16 +81,18 @@ try:
     distilbert_model.eval()
     print("✓ DistilBERT toxic_bullying_model loaded")
 except Exception as e:
-    print(f"✗ DistilBERT model: {e}")
+    print(f"✗ DistilBERT not loaded: {e} — falling back to sklearn")
 
-# ── Fallback sklearn English model (commented out — replaced by DistilBERT) ──
-# try:
-#     with open(model_path / "cyberbullying_model.pkl", "rb") as f:
-#         model = pickle.load(f)
-#     with open(model_path / "tfidf_vectorizer.pkl", "rb") as f:
-#         vectorizer = pickle.load(f)
-# except Exception as e:
-#     print(f"✗ sklearn model: {e}")
+# ── sklearn fallback English model ───────────────────────────────────────
+if not distilbert_model:
+    try:
+        with open(model_path / "cyberbullying_model.pkl", "rb") as f:
+            model = pickle.load(f)
+        with open(model_path / "tfidf_vectorizer.pkl", "rb") as f:
+            vectorizer = pickle.load(f)
+        print("✓ sklearn cyberbullying_model loaded (fallback)")
+    except Exception as e:
+        print(f"✗ sklearn model: {e}")
 
 try:
     with open(model_path / "text_cleaner.pkl", "rb") as f:
@@ -123,59 +121,32 @@ except Exception as e:
 class TextInput(BaseModel):
     text: str
 
+DISTILBERT_LABEL_MAP = {
+    0: 'toxic', 1: 'severe_toxic', 2: 'obscene',
+    3: 'threat', 4: 'insult', 5: 'identity_hate'
+}
+
 ENGLISH_TOXIC_KEYWORDS = [
-    # Profanity
     'fuck', 'fucking', 'fucker', 'fucked', 'fck', 'fuk', 'wtf',
-    'shit', 'shitty', 'bullshit', 'horseshit',
-    'bitch', 'bitchy', 'bitches',
-    'ass', 'asshole', 'arse', 'arsehole',
-    'bastard', 'damn', 'crap', 'crappy',
-    'dick', 'dickhead', 'cock', 'cockhead',
-    'pussy', 'cunt', 'whore', 'slut', 'skank', 'hoe',
-    'prick', 'twat', 'wanker', 'tosser', 'bellend',
-
-    # Insults
-    'stupid', 'stupido', 'idiot', 'idiotic',
-    'hate', 'hater', 'hating',
-    'kill', 'die', 'dead', 'death',
-    'ugly', 'loser', 'dumb', 'dumbass', 'dumbhead',
-    'worthless', 'pathetic', 'trash', 'garbage',
-    'moron', 'fool', 'freak', 'freaky',
-    'retard', 'retarded', 'imbecile', 'scum', 'scumbag',
-    'pig', 'fat', 'fatso', 'fatty', 'lard',
-    'disgusting', 'disgust', 'revolting',
-    'smelly', 'stink', 'stinks', 'stinky',
-    'gross', 'nasty', 'creep', 'creepy', 'weirdo', 'weird',
-    'nobody', 'nothing', 'useless', 'hopeless', 'failure',
-    'coward', 'wimp', 'crybaby', 'baby', 'clown',
-    'joke', 'laughingstock', 'embarrassment',
-    'shut up', 'shutup', 'go away', 'get lost', 'drop dead',
-    'no one likes you', 'nobody likes you', 'everyone hates you',
-    'go die', 'kys', 'kill yourself',
-
-    # Homophobic / discriminatory
+    'shit', 'shitty', 'bullshit', 'bitch', 'bitchy', 'bitches',
+    'ass', 'asshole', 'arse', 'arsehole', 'bastard', 'damn', 'crap',
+    'dick', 'dickhead', 'cock', 'pussy', 'cunt', 'whore', 'slut',
+    'skank', 'hoe', 'prick', 'twat', 'wanker', 'tosser', 'bellend',
+    'stupid', 'idiot', 'hate', 'kill', 'die', 'ugly', 'loser', 'dumb',
+    'dumbass', 'worthless', 'pathetic', 'trash', 'garbage', 'moron',
+    'fool', 'freak', 'retard', 'retarded', 'imbecile', 'scum', 'scumbag',
+    'pig', 'fat', 'fatso', 'fatty', 'disgusting', 'smelly', 'stink',
+    'stinks', 'stinky', 'gross', 'nasty', 'creep', 'weirdo',
+    'nobody', 'useless', 'hopeless', 'failure', 'coward', 'wimp',
+    'crybaby', 'clown', 'shut up', 'shutup', 'go away', 'get lost',
+    'drop dead', 'no one likes you', 'nobody likes you', 'go die',
+    'kys', 'kill yourself', 'everyone hates you',
     'gay', 'fag', 'faggot', 'dyke', 'homo', 'queer',
-    'tranny', 'transgender freak',
-    'racist', 'sexist', 'bigot',
-
-    # Threats
     'kill you', 'hurt you', 'beat you', 'destroy you', 'rape',
-    'i will find you', 'watch your back', 'you will pay',
-    'gonna get you', 'come after you',
-
-    # Family insults
     'ur mum', 'your mum', 'ur mom', 'your mom',
-    'ur dad', 'your dad', 'ur family', 'your family',
-    'son of a bitch', 'son of a whore', 'motherf',
-
-    # Body shaming
-    'fat pig', 'ugly pig', 'cow', 'whale',
-    'flat', 'tiny', 'small',
-
-    # Misc
-    'poop', 'poopie', 'poo', 'piss', 'pissed',
-    'suck', 'sucks', 'sucker', 'lick my',
-    'go to hell', 'burn in hell', 'rot in hell',
+    'son of a bitch', 'motherf',
+    'poop', 'poopie', 'poo', 'piss',
+    'suck', 'sucks', 'go to hell', 'burn in hell',
 ]
 
 def extract_toxic_keywords(text, top_n=5):
@@ -187,15 +158,7 @@ def keyword_based_check(text):
     found = [w for w in ENGLISH_TOXIC_KEYWORDS if w in normalized]
     return len(found) > 0, found
 
-DISTILBERT_LABEL_MAP = {
-    0: 'toxic', 1: 'severe_toxic', 2: 'obscene',
-    3: 'threat', 4: 'insult', 5: 'identity_hate'
-}
-
-def predict_english(text):
-    """DistilBERT multi-label English prediction."""
-    if not distilbert_model or not distilbert_tokenizer:
-        return None
+def predict_english_distilbert(text):
     try:
         import torch, torch.nn as nn
         inputs = distilbert_tokenizer(text, return_tensors='pt', truncation=True, max_length=512)
@@ -204,10 +167,9 @@ def predict_english(text):
         probs = nn.Sigmoid()(logits)[0]
         detected = {DISTILBERT_LABEL_MAP[i]: round(float(probs[i]), 2) for i in range(6) if probs[i] > 0.5}
         is_toxic = len(detected) > 0
-        confidence = round(float(max(probs)), 2)
         return {
             "prediction": 1 if is_toxic else 0,
-            "confidence": confidence,
+            "confidence": round(float(max(probs)), 2),
             "model_used": "distilbert_toxic_bullying",
             "detected_labels": detected
         }
@@ -215,16 +177,24 @@ def predict_english(text):
         print(f"DistilBERT predict error: {e}")
         return None
 
+def predict_english_sklearn(text):
+    if not model or not vectorizer or not cleaner:
+        return None
+    normalized = normalize_obfuscation(text)
+    cleaned = cleaner.transform([normalized])
+    vec = vectorizer.transform(cleaned)
+    pred = int(model.predict(vec)[0])
+    conf = float(max(model.predict_proba(vec)[0]))
+    return {"prediction": pred, "confidence": round(conf, 2), "model_used": "cyberbullying_model", "detected_labels": {}}
+
 def build_categories(prediction, text, detected_labels=None):
     cats = {k: 0 for k in ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]}
     if prediction == 1:
         if detected_labels:
-            # use DistilBERT's actual detected labels
             for label in detected_labels:
                 if label in cats:
                     cats[label] = 1
         else:
-            # keyword-based fallback category detection
             text_lower = text.lower()
             cats["toxic"] = 1
             if any(w in text_lower for w in ['kill', 'die', 'death', 'madarchod', 'behenchod']):
@@ -261,7 +231,7 @@ async def predict(input_data: TextInput):
                     "model_used": "hindi_trained_model"
                 }
             except Exception as e:
-                print(f"Hindi model error: {e}, falling back to keyword matching")
+                print(f"Hindi model error: {e}")
 
         # ── Hindi / Telugu keyword fallback ──
         if language in ['hindi', 'telugu']:
@@ -278,14 +248,17 @@ async def predict(input_data: TextInput):
 
         # ── English ──
         kw_toxic, kw_found = keyword_based_check(input_data.text)
-        eng = predict_english(input_data.text)
+
+        # Try DistilBERT first, fall back to sklearn
+        eng = predict_english_distilbert(input_data.text) if distilbert_model else None
+        if eng is None:
+            eng = predict_english_sklearn(input_data.text)
 
         if eng is not None:
             pred = eng["prediction"]
             confidence = eng["confidence"]
             model_used = eng["model_used"]
             detected_labels = eng.get("detected_labels", {})
-            # keyword override — explicit slurs override model
             if kw_toxic and pred == 0:
                 pred = 1
                 confidence = max(confidence, 0.80)
@@ -321,6 +294,7 @@ async def health():
         "models": {
             "distilbert_english": distilbert_model is not None,
             "distilbert_tokenizer": distilbert_tokenizer is not None,
+            "sklearn_fallback": model is not None,
             "hindi_model": hindi_model is not None,
             "hindi_vectorizer": hindi_vectorizer is not None,
         }
@@ -328,4 +302,4 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"message": "Cyberbullying Detection ML Service", "version": "2.0.0"}
+    return {"message": "Cyberbullying Detection ML Service", "version": "3.0.0"}
